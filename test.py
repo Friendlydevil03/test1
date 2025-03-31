@@ -37,8 +37,9 @@ class VehicleDetector:
             print(f"GPU Memory before model: {torch.cuda.memory_allocated() / 1024 ** 2:.2f}MB")
 
         try:
-            # Load pre-trained model
-            self.model = detection.fasterrcnn_resnet50_fpn(pretrained=True)
+            # Load pre-trained model with updated API
+            from torchvision.models.detection import FasterRCNN_ResNet50_FPN_Weights
+            self.model = detection.fasterrcnn_resnet50_fpn(weights=FasterRCNN_ResNet50_FPN_Weights.DEFAULT)
             self.model.to(self.device)
             self.model.eval()
 
@@ -52,7 +53,7 @@ class VehicleDetector:
             print(f"Error loading model: {e}")
             raise
 
-        # COCO class names (we're interested in vehicles)
+        # COCO class names
         self.classes = [
             'background', 'person', 'bicycle', 'car', 'motorcycle',
             'airplane', 'bus', 'train', 'truck', 'boat'
@@ -69,8 +70,8 @@ class VehicleDetector:
                 with torch.no_grad():
                     _ = self.model(dummy_input)
                 print("Model warm-up completed")
-            except:
-                print("Model warm-up failed, continuing anyway")
+            except Exception as e:
+                print(f"Model warm-up failed: {str(e)}, continuing anyway")
 
     def detect_vehicles(self, frame):
         orig_h, orig_w = frame.shape[:2]
@@ -145,7 +146,6 @@ class ParkingManagementSystem:
         self._cleanup_lock = threading.Lock()
         self.data_lock = threading.Lock()
         self.video_lock = threading.Lock()
-        self.torch_gpu_available, self.cv_gpu_available = self.check_gpu_availability()
         self.torch_gpu_available, self.cv_gpu_available = self.check_gpu_availability()
         self.diagnose_gpu()  # Add this line
 
@@ -460,14 +460,12 @@ class ParkingManagementSystem:
         self.control_canvas = control_canvas
 
     def test_gpu(self):
-        """Test GPU detection and performance"""
+
         message = "GPU Status:\n"
-        message += f"PyTorch GPU: {'Available' if self.torch_gpu_available else 'Not Available'}\n"
+        message += f"PyTorch GPU: {'Available' if torch.cuda.is_available() else 'Not Available'}\n"
         message += f"OpenCV GPU: {'Available' if self.cv_gpu_available else 'Not Available'}"
 
         messagebox.showinfo("GPU Test Results", message)
-
-        self.diagnose_gpu()
 
         # Create a dialog to show results
         dialog = Toplevel(self.master)
@@ -493,46 +491,43 @@ class ParkingManagementSystem:
             result_text.insert("end", f"GPU Device: {torch.cuda.get_device_name(0)}\n")
             result_text.insert("end", f"CUDA Version: {torch.version.cuda}\n")
 
-            # Simple performance test
-            result_text.insert("end", "\nRunning GPU speed test...\n")
+            # Simple performance test with proper error handling
+            result_text.insert("end", "\nRunning GPU speed test (smaller tensor size for safety)...\n")
 
-            # Create test tensor on CPU
-            start_time = time.time()
-            cpu_tensor = torch.randn(5000, 5000)
-            cpu_time = time.time() - start_time
-            result_text.insert("end", f"CPU tensor creation: {cpu_time:.4f} seconds\n")
-
-            # Create test tensor on GPU
             try:
+                # Use smaller tensor size to avoid OOM errors
+                tensor_size = 2000  # Reduced from 5000
+
+                # Create test tensor on CPU
                 start_time = time.time()
-                gpu_tensor = torch.randn(5000, 5000, device=self.device)
-                gpu_time = time.time() - start_time
-                result_text.insert("end", f"GPU tensor creation: {gpu_time:.4f} seconds\n")
+                cpu_tensor = torch.randn(tensor_size, tensor_size)
+                cpu_time = time.time() - start_time
+                result_text.insert("end", f"CPU tensor creation: {cpu_time:.4f} seconds\n")
 
-                speedup = cpu_time / gpu_time if gpu_time > 0 else 0
-                result_text.insert("end", f"GPU speedup: {speedup:.2f}x\n")
+                # Create test tensor on GPU with error handling
+                try:
+                    torch.cuda.empty_cache()  # Clear GPU memory first
+                    start_time = time.time()
+                    gpu_tensor = torch.randn(tensor_size, tensor_size, device='cuda')
+                    torch.cuda.synchronize()  # Wait for GPU operations to complete
+                    gpu_time = time.time() - start_time
+                    result_text.insert("end", f"GPU tensor creation: {gpu_time:.4f} seconds\n")
+
+                    speedup = cpu_time / gpu_time if gpu_time > 0 else 0
+                    result_text.insert("end", f"GPU speedup: {speedup:.2f}x\n")
+
+                    # Clean up to avoid memory issues
+                    del gpu_tensor
+                    torch.cuda.empty_cache()
+                except RuntimeError as e:
+                    if "CUDA out of memory" in str(e):
+                        result_text.insert("end", "GPU test failed: CUDA out of memory. Try reducing the workload.\n")
+                    else:
+                        result_text.insert("end", f"GPU test failed: {str(e)}\n")
+                except Exception as e:
+                    result_text.insert("end", f"GPU test failed: {str(e)}\n")
             except Exception as e:
-                result_text.insert("end", f"GPU test failed: {str(e)}\n")
-        else:
-            # Check CUDA installation
-            import subprocess
-            try:
-                nvidia_smi = subprocess.check_output("nvidia-smi", shell=True).decode()
-                result_text.insert("end", "\nNVIDIA GPU detected by system but not by PyTorch!\n")
-                result_text.insert("end", "This indicates a PyTorch/CUDA version mismatch.\n\n")
-                result_text.insert("end", "NVIDIA System Info:\n")
-                result_text.insert("end", nvidia_smi[:500] + "...\n")  # Show first 500 chars
-            except:
-                result_text.insert("end",
-                                   "\nNo NVIDIA drivers detected. GPU may not be present or drivers not installed.\n")
-
-        # Add solution recommendations
-        result_text.insert("end", "\nRecommendations:\n")
-        result_text.insert("end", "1. Ensure NVIDIA drivers are installed and up to date\n")
-        result_text.insert("end", "2. Install PyTorch with the correct CUDA version:\n")
-        result_text.insert("end",
-                           "   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118\n")
-        result_text.insert("end", "3. Check that your GPU is compatible with CUDA\n")
+                result_text.insert("end", f"Performance test failed: {str(e)}\n")
 
         # Disable editing
         result_text.config(state="disabled")
@@ -1297,7 +1292,6 @@ class ParkingManagementSystem:
         self.reset_detection_parameters()
 
     def initialize_ml_detector(self):
-        """Initialize the machine learning detector with progress display"""
         try:
             # Show loading message
             loading_window = Toplevel(self.master)
@@ -1307,11 +1301,13 @@ class ParkingManagementSystem:
             loading_window.transient(self.master)
             loading_window.grab_set()
 
-            # Add more information
+            # Add information
             gpu_info_label = Label(loading_window, text="")
             gpu_info_label.pack(pady=5)
 
             if torch.cuda.is_available():
+                # Clear cache before loading model
+                torch.cuda.empty_cache()
                 gpu_name = torch.cuda.get_device_name(0)
                 gpu_info_label.config(text=f"Using GPU: {gpu_name}")
             else:
@@ -1323,8 +1319,17 @@ class ParkingManagementSystem:
 
             self.log_event("Initializing ML detector...")
 
-            # Initialize the model
-            self.ml_detector = VehicleDetector(confidence_threshold=self.ml_confidence)
+            # Initialize model with proper weights parameter
+            try:
+                from torchvision.models.detection import FasterRCNN_ResNet50_FPN_Weights
+                self.ml_detector = VehicleDetector(confidence_threshold=self.ml_confidence)
+                self.ml_detector.model = detection.fasterrcnn_resnet50_fpn(
+                    weights=FasterRCNN_ResNet50_FPN_Weights.DEFAULT)
+                self.ml_detector.model.to(self.ml_detector.device)
+                self.ml_detector.model.eval()
+            except AttributeError:
+                # Fall back to older API if using older PyTorch
+                self.ml_detector = VehicleDetector(confidence_threshold=self.ml_confidence)
 
             # Update message
             progress_label.config(text="ML model loaded successfully!")
@@ -1693,6 +1698,60 @@ class ParkingManagementSystem:
             self.master.after(10, self.process_frame)  # Standard delay
         else:
             self.master.after(1, self.process_frame)  # Faster for ML detection
+
+    def process_frame_optimized(self):
+        """Optimized frame processing method with better GPU handling"""
+        if not self.running:
+            return
+
+        try:
+            # Use video_lock to prevent concurrency issues
+            with self.video_lock:
+                # Read frame from video
+                success, img = self.video_capture.read()
+
+            # Reset video if at end
+            if not success:
+                with self.video_lock:
+                    self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    success, img = self.video_capture.read()
+                if not success:
+                    self.status_label.config(text="Status: Video Error", fg="red")
+                    self.log_event("Video error occurred")
+                    self.stop_detection()
+                    return
+
+            # Use GPU resize if available
+            if img.shape[1] != self.image_width or img.shape[0] != self.image_height:
+                img = self.gpu_resize(img, (self.image_width, self.image_height))
+
+            # Process based on selected mode
+            if self.detection_mode == "parking":
+                img = self.process_parking_detection(img)
+            else:  # Vehicle detection mode
+                img = self.process_vehicle_detection(img)
+
+            # Update UI with processed image
+            self.update_display(img)
+
+            # Schedule next frame with appropriate delay
+            delay = 1 if self.use_ml_detection and self.detection_mode == "vehicle" else 10
+            self.master.after(delay, self.process_frame_optimized)
+
+        except RuntimeError as e:
+            if "CUDA out of memory" in str(e):
+                self.log_event("GPU memory error: falling back to CPU")
+                if hasattr(self, 'ml_detector') and self.ml_detector:
+                    self.ml_detector.device = torch.device('cpu')
+                    if hasattr(self.ml_detector, 'model'):
+                        self.ml_detector.model.to(self.ml_detector.device)
+                self.master.after(10, self.process_frame_optimized)
+            else:
+                self.log_event(f"Error in frame processing: {str(e)}")
+                self.master.after(100, self.process_frame_optimized)  # Retry with longer delay
+        except Exception as e:
+            self.log_event(f"Error in frame processing: {str(e)}")
+            self.master.after(100, self.process_frame_optimized)  # Retry with longer delay
 
     def update_status_info(self):
         """Update the status information display"""
